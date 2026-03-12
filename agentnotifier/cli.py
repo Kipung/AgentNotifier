@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -49,6 +52,138 @@ TERMINAL_APP_NAMES = {
     "Hyper",
     "Tabby",
 }
+
+HOOK_STDIN_READ_TIMEOUT_SECONDS = 0.2
+
+
+def _toml_basic_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _toml_array(items: list[str]) -> str:
+    return f"[{', '.join(_toml_basic_string(item) for item in items)}]"
+
+
+def _resolve_codex_config_path(override_path: str | None) -> Path:
+    if override_path:
+        return Path(override_path).expanduser()
+
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _upsert_codex_notify_config(*, existing_text: str, notify_line: str) -> str:
+    lines = existing_text.splitlines(keepends=True)
+    rebuilt_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() != "[notify]":
+            rebuilt_lines.append(line)
+            index += 1
+            continue
+
+        # Remove legacy table header and common bridge fields.
+        # Keep unknown keys instead of dropping user content.
+        index += 1
+        while index < len(lines):
+            current = lines[index]
+            stripped = current.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                break
+            if stripped == "" or stripped.startswith("#"):
+                index += 1
+                continue
+            if re.match(r"^\s*program\s*=", current):
+                index += 1
+                continue
+            if re.match(r"^\s*args\s*=", current):
+                balance = current.count("[") - current.count("]")
+                index += 1
+                while balance > 0 and index < len(lines):
+                    balance += lines[index].count("[") - lines[index].count("]")
+                    index += 1
+                continue
+            rebuilt_lines.append(current)
+            index += 1
+
+    updated = "".join(rebuilt_lines)
+
+    patterns = [
+        re.compile(r"(?ms)^notify\s*=\s*\[[^\]]*\]\s*"),
+        re.compile(r"(?m)^notify\s*=.*$"),
+    ]
+    for pattern in patterns:
+        if pattern.search(updated):
+            return pattern.sub(notify_line, updated, count=1)
+
+    lines = updated.splitlines(keepends=True)
+    insert_at = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            insert_at = index
+            break
+
+    prefix = "".join(lines[:insert_at])
+    suffix = "".join(lines[insert_at:])
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    if prefix and not prefix.endswith("\n\n"):
+        prefix += "\n"
+    return f"{prefix}{notify_line}{suffix}"
+
+
+def _escape_powershell_single_quoted(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _render_windows_codex_wrapper(*, hook_path: Path) -> str:
+    escaped_hook = _escape_powershell_single_quoted(str(hook_path))
+    return "\n".join(
+        [
+            "param(",
+            "  [Parameter(ValueFromRemainingArguments = $true)]",
+            "  [string[]]$ArgsFromCodex",
+            ")",
+            "",
+            f"$hook = '{escaped_hook}'",
+            "& $hook @ArgsFromCodex",
+            "exit $LASTEXITCODE",
+            "",
+        ]
+    )
+
+
+def _resolve_codex_notify_command(
+    *,
+    hook_path: Path,
+    codex_config_path: Path,
+) -> tuple[list[str], Path | None]:
+    resolved_hook = hook_path.resolve()
+    if platform.system() != "Windows":
+        return [str(resolved_hook)], None
+
+    wrapper_path = codex_config_path.with_name("agent-notifier-codex-wrapper.ps1")
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+    if wrapper_path.exists():
+        wrapper_path.unlink()
+    wrapper_path.write_text(
+        _render_windows_codex_wrapper(hook_path=resolved_hook),
+        encoding="utf-8",
+    )
+    resolved_wrapper = wrapper_path.resolve()
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(resolved_wrapper),
+    ], resolved_wrapper
 
 
 class _DesktopConsoleNotifier(Notifier):
@@ -195,6 +330,50 @@ def _extract_payload_event(payload: dict[str, object]) -> str:
         ),
         80,
     )
+
+
+def _read_hook_stdin_text(*, verbose: bool, source_label: str) -> str | None:
+    """Read hook payload text from stdin without blocking on interactive terminals."""
+    try:
+        stdin_is_tty = sys.stdin.isatty()
+    except Exception:
+        stdin_is_tty = False
+
+    if stdin_is_tty:
+        if verbose:
+            _warn(
+                f"{source_label} expects hook payload via stdin or arguments. "
+                "Interactive stdin detected; skipping notification."
+            )
+        return None
+
+    read_result: dict[str, str | Exception] = {}
+    read_complete = threading.Event()
+
+    def _reader() -> None:
+        try:
+            read_result["text"] = sys.stdin.read()
+        except Exception as exc:  # pragma: no cover - defensive
+            read_result["error"] = exc
+        finally:
+            read_complete.set()
+
+    thread = threading.Thread(target=_reader, name="agent-notifier-hook-stdin", daemon=True)
+    thread.start()
+    if not read_complete.wait(HOOK_STDIN_READ_TIMEOUT_SECONDS):
+        if verbose:
+            _warn(
+                f"{source_label} received no stdin payload before timeout; "
+                "skipping notification."
+            )
+        return None
+
+    error = read_result.get("error")
+    if isinstance(error, Exception):
+        if verbose:
+            _warn(f"{source_label} could not read stdin payload: {error}")
+        return None
+    return read_result.get("text", "")
 
 
 def _normalize_event_name(name: str) -> str:
@@ -484,6 +663,79 @@ def _notifier_watch_with_fallback(
 
 
 @app.command(
+    "setup-codex",
+    help="Configure Codex notify hook in ~/.codex/config.toml (idempotent).",
+)
+@click.option(
+    "--codex-config",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Override Codex config.toml path. Default: $CODEX_HOME/config.toml or ~/.codex/config.toml",
+)
+@click.option(
+    "--hook-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Absolute path to agent-notifier-codex-hook executable.",
+)
+@click.option(
+    "--backup/--no-backup",
+    default=True,
+    show_default=True,
+    help="Create timestamped backup before updating existing config.",
+)
+def setup_codex_command(
+    codex_config: Path | None,
+    hook_path: Path | None,
+    backup: bool,
+) -> None:
+    resolved_hook = hook_path.expanduser() if hook_path else None
+    if resolved_hook is None:
+        discovered = shutil.which("agent-notifier-codex-hook")
+        if discovered is None:
+            click.secho(
+                "Could not find 'agent-notifier-codex-hook' on PATH. "
+                "Install agent-notifier first or pass --hook-path.",
+                fg="red",
+                err=True,
+            )
+            raise SystemExit(1)
+        resolved_hook = Path(discovered)
+    if not resolved_hook.exists():
+        click.secho(f"Hook path does not exist: {resolved_hook}", fg="red", err=True)
+        raise SystemExit(1)
+
+    config_path = _resolve_codex_config_path(str(codex_config) if codex_config else None)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    notify_command, wrapper_path = _resolve_codex_notify_command(
+        hook_path=resolved_hook,
+        codex_config_path=config_path,
+    )
+
+    existing_text = ""
+    if config_path.exists():
+        existing_text = config_path.read_text(encoding="utf-8")
+        if backup:
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup_path = config_path.with_name(f"{config_path.name}.bak.{stamp}")
+            backup_path.write_text(existing_text, encoding="utf-8")
+            click.echo(f"Backed up {config_path} -> {backup_path}")
+
+    notify_line = f"notify = {_toml_array(notify_command)}\n"
+    updated_text = _upsert_codex_notify_config(
+        existing_text=existing_text,
+        notify_line=notify_line,
+    )
+    config_path.write_text(updated_text, encoding="utf-8")
+
+    click.echo(f"Codex config: {config_path}")
+    click.echo(f"Hook path: {resolved_hook.resolve()}")
+    if wrapper_path is not None:
+        click.echo(f"Wrapper path: {wrapper_path}")
+    click.echo("Updated top-level notify hook for Codex.")
+
+
+@app.command(
     "run",
     context_settings={"ignore_unknown_options": True},
     help="Run a command, wait for completion, and send notification.",
@@ -735,8 +987,12 @@ def gemini_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_hook_stdin_text(verbose=verbose, source_label="Gemini hook")
+    if payload_text is None:
+        return
+
     payload = _read_json_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Gemini hook",
     )
@@ -855,8 +1111,12 @@ def claude_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_hook_stdin_text(verbose=verbose, source_label="Claude hook")
+    if payload_text is None:
+        return
+
     payload = _read_json_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Claude hook",
     )
@@ -963,7 +1223,10 @@ def codex_hook_command(
 ) -> None:
     payload_obj = _parse_codex_payload_parts(payload_parts)
     if payload_obj is None:
-        payload_obj = _try_parse_json_object(sys.stdin.read())
+        payload_text = _read_hook_stdin_text(verbose=verbose, source_label="Codex hook")
+        if payload_text is None:
+            return
+        payload_obj = _try_parse_json_object(payload_text)
     if payload_obj is None:
         if verbose:
             _warn("Codex hook payload missing. Skipping notification.")
@@ -1059,8 +1322,12 @@ def ollama_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_hook_stdin_text(verbose=verbose, source_label="Ollama hook")
+    if payload_text is None:
+        return
+
     payload = _read_json_lines_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Ollama hook",
     )

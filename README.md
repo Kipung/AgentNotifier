@@ -98,6 +98,25 @@ It notifies when hook events fire (Codex/Claude/Gemini integrations), not when y
 
 Codex provides a notification hook.
 
+Recommended setup (automatic, idempotent):
+
+```bash
+agent-notifier setup-codex
+```
+
+This updates `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) with a top-level `notify = [...]` command.
+On macOS/Linux it points directly at `agent-notifier-codex-hook`; on Windows it writes a PowerShell wrapper command that calls the installed hook executable.
+
+```toml
+notify = ["/absolute/path/to/agent-notifier-codex-hook"]
+```
+
+Then restart Codex and run:
+
+```bash
+agent-notifier test-notifier --channel both --verbose
+```
+
 Preferred (works great with `pipx`/`pip` installs):
 
 ```bash

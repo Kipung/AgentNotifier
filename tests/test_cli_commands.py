@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import json
+import time
+from pathlib import Path
 
 from click.testing import CliRunner
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib
+
+from agentnotifier import cli
 from agentnotifier.cli import app
 from agentnotifier.notifier.base import NotificationError, NotificationLevel, Notifier
 
@@ -330,6 +338,233 @@ def test_codex_hook_command_without_payload_skips() -> None:
     )
     assert result.exit_code == 0
     assert "payload missing" in result.output
+
+
+def test_codex_hook_command_interactive_stdin_skips_without_reading(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+
+    class _TTYStdin:
+        def isatty(self) -> bool:
+            return True
+
+        def read(self) -> str:
+            raise AssertionError("read() should not be called for interactive stdin")
+
+    monkeypatch.setattr("agentnotifier.cli.sys.stdin", _TTYStdin())
+    result = runner.invoke(
+        app,
+        [
+            "codex-hook",
+            "--channel",
+            "console",
+            "--verbose",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "payload missing" in result.output
+
+
+def test_codex_hook_command_noninteractive_stdin_timeout_skips(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _BlockingStdin:
+        def isatty(self) -> bool:
+            return False
+
+        def read(self) -> str:
+            time.sleep(1)
+            return ""
+
+    monkeypatch.setattr("agentnotifier.cli.sys.stdin", _BlockingStdin())
+    result = cli._read_hook_stdin_text(
+        verbose=True,
+        source_label="Codex hook",
+    )
+    assert result is None
+
+
+def test_setup_codex_command_creates_notify_with_explicit_paths(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+    monkeypatch.setattr("agentnotifier.cli.platform.system", lambda: "Linux")
+    hook_path = tmp_path / "bin" / "agent-notifier-codex-hook"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("", encoding="utf-8")
+
+    config_path = tmp_path / ".codex" / "config.toml"
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(hook_path),
+            "--no-backup",
+        ],
+    )
+    assert result.exit_code == 0
+    text = config_path.read_text(encoding="utf-8")
+    assert 'notify = ["' in text
+    assert "agent-notifier-codex-hook" in text
+    assert "[notify]" not in text
+    assert "Updated top-level notify hook for Codex." in result.output
+
+
+def test_setup_codex_command_replaces_notify_table_and_keeps_other_config(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+    monkeypatch.setattr("agentnotifier.cli.platform.system", lambda: "Linux")
+    hook_path = tmp_path / "bin" / "agent-notifier-codex-hook"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("", encoding="utf-8")
+
+    config_path = tmp_path / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        (
+            "[notify]\n"
+            'program = "powershell.exe"\n'
+            'args = ["-NoProfile"]\n'
+            'model = "gpt-5"\n\n'
+            "[projects.'C:\\\\Users\\\\asael']\n"
+            'trust_level = "trusted"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(hook_path),
+        ],
+    )
+    assert result.exit_code == 0
+    text = config_path.read_text(encoding="utf-8")
+    assert "[notify]" not in text
+    assert 'notify = ["' in text
+    assert 'model = "gpt-5"' in text
+    assert "[projects.'C:\\\\Users\\\\asael']" in text
+    assert 'trust_level = "trusted"' in text
+    assert "Backed up" in result.output
+
+
+def test_setup_codex_command_on_windows_writes_wrapper_notify_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+    monkeypatch.setattr("agentnotifier.cli.platform.system", lambda: "Windows")
+
+    hook_path = tmp_path / "bin" / "agent-notifier-codex-hook.exe"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("", encoding="utf-8")
+
+    config_path = tmp_path / ".codex" / "config.toml"
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(hook_path),
+            "--no-backup",
+        ],
+    )
+
+    assert result.exit_code == 0
+    text = config_path.read_text(encoding="utf-8")
+    assert 'notify = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",' in text
+    assert "agent-notifier-codex-wrapper.ps1" in text
+    wrapper_path = tmp_path / ".codex" / "agent-notifier-codex-wrapper.ps1"
+    assert wrapper_path.exists()
+    wrapper_text = wrapper_path.read_text(encoding="utf-8")
+    assert str(hook_path.resolve()) in wrapper_text
+    assert "Wrapper path:" in result.output
+
+
+def test_setup_codex_command_on_windows_writes_valid_toml(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+    monkeypatch.setattr("agentnotifier.cli.platform.system", lambda: "Windows")
+
+    hook_path = tmp_path / "bin" / "agent-notifier-codex-hook.exe"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("", encoding="utf-8")
+
+    config_path = tmp_path / ".codex" / "config.toml"
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(hook_path),
+            "--no-backup",
+        ],
+    )
+
+    assert result.exit_code == 0
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["notify"][0] == "powershell.exe"
+    assert parsed["notify"][-1].endswith("agent-notifier-codex-wrapper.ps1")
+
+
+def test_setup_codex_command_inserts_notify_before_existing_tables(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runner = CliRunner()
+    monkeypatch.setattr("agentnotifier.cli.platform.system", lambda: "Windows")
+
+    hook_path = tmp_path / "bin" / "agent-notifier-codex-hook.exe"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("", encoding="utf-8")
+
+    config_path = tmp_path / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        (
+            'model = "gpt-5.4"\n\n'
+            "[projects.'C:\\\\Users\\\\asael']\n"
+            'trust_level = "trusted"\n\n'
+            "[notice.model_migrations]\n"
+            '"gpt-5.3-codex" = "gpt-5.4"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(hook_path),
+            "--no-backup",
+        ],
+    )
+
+    assert result.exit_code == 0
+    text = config_path.read_text(encoding="utf-8")
+    assert 'model = "gpt-5.4"\nnotify = [' in text
+    parsed = tomllib.loads(text)
+    assert parsed["notify"][0] == "powershell.exe"
+    assert parsed["notice"]["model_migrations"]["gpt-5.3-codex"] == "gpt-5.4"
+
+
+def test_setup_codex_command_fails_for_missing_hook_path(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / ".codex" / "config.toml"
+    result = runner.invoke(
+        app,
+        [
+            "setup-codex",
+            "--codex-config",
+            str(config_path),
+            "--hook-path",
+            str(tmp_path / "missing" / "agent-notifier-codex-hook"),
+            "--no-backup",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Hook path does not exist" in result.output
 
 
 def test_ollama_hook_command_notifies_on_done_jsonl() -> None:
