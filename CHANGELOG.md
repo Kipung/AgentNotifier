@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-03-14
+
+### Fixed
+
+- **Codex `notify` written inside wrong TOML section.**
+  When the Codex config contained section headers (e.g. `[notice.model_migrations]`)
+  at the end of the file, the new `notify` key was appended after the last header,
+  making TOML parse it as `notice.model_migrations.notify` (a string, not an array).
+  Codex then errored with `invalid type: sequence, expected a string`.
+  The key is now inserted before the first `[section]` header so it always lands
+  at the top level.
+
 ## [0.1.4] - 2026-03-14
 
 ### Fixed

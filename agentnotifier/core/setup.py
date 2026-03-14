@@ -280,6 +280,16 @@ def _upsert_notify_hook(text: str, hook_command: str) -> tuple[str, bool]:
         return _replace_notify_match(text, scalar_match, hook_command)
 
     replacement = _render_notify_assignment(hook_values=[hook_command], indent="")
+    # Insert before the first [section] header so the key stays at the top level.
+    # Appending to the end would place it inside the last TOML table.
+    section_match = re.search(r"(?m)^\[", text)
+    if section_match:
+        insert_pos = section_match.start()
+        prefix = text[:insert_pos].rstrip("\n")
+        suffix = text[insert_pos:]
+        updated = f"{prefix}\n\n{replacement}\n\n{suffix}" if prefix else f"{replacement}\n\n{suffix}"
+        return updated, True
+
     updated = text
     if updated.strip():
         if not updated.endswith("\n"):
