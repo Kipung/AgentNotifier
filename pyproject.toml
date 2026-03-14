@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-notifier"
-version = "0.1.2"
+dynamic = ["version"]
 description = "Cross-platform notifications for long-running agentic CLI tools"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
   { name = "agent-notifier contributors" }
 ]
@@ -16,7 +16,7 @@ keywords = ["cli", "notification", "agents", "codex", "developer-tools"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
@@ -55,6 +55,9 @@ agent-notifier-claude-hook = "agentnotifier.bridges:claude_hook_main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentnotifier*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agentnotifier.__version__" }
 
 [tool.pytest.ini_options]
 addopts = "-ra"

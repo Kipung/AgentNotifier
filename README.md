@@ -21,6 +21,13 @@ Recommended:
 python3 -m pip install --user pipx
 python3 -m pipx ensurepath
 pipx install agent-notifier
+agent-notifier setup codex
+```
+
+If you use multiple interactive CLIs from the current project:
+
+```bash
+agent-notifier setup all --project "$PWD"
 ```
 
 Alternative:
@@ -29,7 +36,25 @@ Alternative:
 pip install agent-notifier
 ```
 
-If `pipx install agent-notifier` fails because the package is not yet on PyPI, install from this repo checkout:
+Windows desktop toasts:
+
+```bash
+pipx install "agent-notifier[windows]"
+```
+
+If you already installed the base package on Windows, inject the fallback backend:
+
+```bash
+pipx inject agent-notifier win10toast
+```
+
+Linux desktop prerequisite:
+
+```bash
+sudo apt install libnotify-bin
+```
+
+If you want the latest local checkout instead of the current PyPI release:
 
 ```bash
 cd /path/to/AgentPulse/packages/agent-notifier
@@ -46,8 +71,17 @@ Confirm install:
 
 ```bash
 agent-notifier --help
+agent-notifier setup codex
+agent-notifier doctor --project "$PWD"
 agent-notifier test-notifier --channel console
 ```
+
+For safety, install does not silently edit your CLI configs.
+Run `agent-notifier setup codex` once after install to wire Codex automatically.
+
+Verified install status:
+- PyPI package `agent-notifier 0.1.2` was reachable and installable via `pipx install agent-notifier` on March 11, 2026.
+- If install succeeds but `agent-notifier` is still not found, run `pipx ensurepath` and start a new shell.
 
 ## Zero-To-Working Setup (macOS, Verified)
 
@@ -98,7 +132,26 @@ It notifies when hook events fire (Codex/Claude/Gemini integrations), not when y
 
 Codex provides a notification hook.
 
-Preferred (works great with `pipx`/`pip` installs):
+Recommended one-time setup after `pipx install` or `pip install`:
+
+```bash
+agent-notifier setup codex
+```
+
+That command:
+- Writes the installed `agent-notifier-codex-hook` entrypoint name by default.
+- Creates `~/.codex/config.toml` if it does not exist.
+- Adds the notifier hook without removing other existing `notify` commands.
+- Creates a timestamped backup before changing an existing config file.
+
+That default keeps the generated config portable across machines.
+If you need to pin an absolute path on one machine, pass it explicitly:
+
+```bash
+agent-notifier setup codex --hook-command "$(command -v agent-notifier-codex-hook)"
+```
+
+If you want to inspect the hook path manually:
 
 ```bash
 BRIDGE_PATH="$(command -v agent-notifier-codex-hook)"
@@ -113,13 +166,15 @@ BRIDGE_PATH="$(realpath examples/codex_notifier_bridge.sh)"
 echo "$BRIDGE_PATH"
 ```
 
-Add to `~/.codex/config.toml`:
+Manual config form:
 
 ```toml
 notify = [
-  "/absolute/path/to/agent-notifier-codex-hook-or-script"
+  "agent-notifier-codex-hook"
 ]
 ```
+
+You can also use an absolute path if your Codex environment does not inherit a reliable `PATH`.
 
 Codex key naming:
 - `notify` is the Codex config key (official in current Codex CLI builds).
@@ -138,15 +193,17 @@ Log location:
 
 #### Manual Verified Flow: macOS + iTerm + Codex
 
-Use this exact flow if you do not use `examples/setup_macos.sh`:
+Use this exact flow if you do not use `examples/setup_macos.sh` or `agent-notifier setup codex`:
 
 1. Set Codex config key to `notify` (not `notifier`) in `~/.codex/config.toml`:
 
 ```toml
 notify = [
-  "/absolute/path/to/examples/codex_notifier_bridge.sh"
+  "agent-notifier-codex-hook"
 ]
 ```
+
+If you are running directly from a source checkout without installing the package, use the script bridge path instead.
 
 2. Ensure the bridge is executable:
 
@@ -180,11 +237,20 @@ Common causes when chime works but popup does not:
 
 ### Claude Code
 
+Recommended one-time setup from your project root:
+
+```bash
+agent-notifier setup claude --project "$PWD"
+```
+
 Preferred bridge command (installed via `pipx`/`pip`):
 
 ```bash
 command -v agent-notifier-claude-hook
 ```
+
+`agent-notifier setup claude` writes `agent-notifier-claude-hook` by default so the config stays portable.
+If Claude runs in an environment with a restricted `PATH`, rerun setup with `--hook-command "$(command -v agent-notifier-claude-hook)"`.
 
 Configure hooks in `.claude/settings.local.json` (or user settings):
 
@@ -227,6 +293,15 @@ Preferred bridge command (installed via `pipx`/`pip`):
 
 ```bash
 command -v agent-notifier-gemini-hook
+```
+
+`agent-notifier setup gemini` writes `agent-notifier-gemini-hook` by default so the config stays portable.
+If Gemini runs without your normal shell `PATH`, rerun setup with `--hook-command "$(command -v agent-notifier-gemini-hook)"`.
+
+Recommended one-time setup from the project root:
+
+```bash
+agent-notifier setup gemini --project "$PWD"
 ```
 
 Configure `AfterAgent` hook:
@@ -313,6 +388,21 @@ ollama run llama3 --format json | agent-notifier ollama-hook --name ollama --cha
 `agent-notifier test-notifier`
 - Send a sample notification.
 
+`agent-notifier doctor --project <path>`
+- Show backend, PATH, and hook configuration diagnostics for the current machine.
+
+`agent-notifier setup codex`
+- Configure Codex `notify = [...]` automatically.
+
+`agent-notifier setup gemini --project <path>`
+- Configure Gemini `AfterAgent` and trust the project folder.
+
+`agent-notifier setup claude --project <path>`
+- Configure Claude Code `Stop` and `SubagentStop` hooks.
+
+`agent-notifier setup all --project <path>`
+- Configure Codex, Gemini, and Claude Code in one pass.
+
 `agent-notifier tail --file <path> --pattern <text>`
 - Notify when a log pattern appears.
 
@@ -376,6 +466,12 @@ If notifications only appear on session exit, verify your CLI is calling `codex-
 
 ### Desktop notifications do not appear
 
+Run the doctor first:
+
+```bash
+agent-notifier doctor --project "$PWD"
+```
+
 1. Test fallback path:
    - `agent-notifier test-notifier --channel console`
 2. Test desktop + diagnostics:
@@ -396,6 +492,8 @@ If notifications only appear on session exit, verify your CLI is calling `codex-
 3. Restart Codex after config changes (required).
 4. Enable bridge debug logs with `AGENT_NOTIFIER_DEBUG=1` and inspect `~/.agentnotifier/logs/codex_notifier.log`.
 5. Do not use the `notifier` key in Codex config; use `notify`.
+6. If Codex cannot find the command from `PATH`, rerun setup with:
+   - `agent-notifier setup codex --hook-command "$(command -v agent-notifier-codex-hook)"`
 
 ### Scenario Matrix (Quick Diagnosis)
 
@@ -406,8 +504,8 @@ Use this section to map a symptom to a concrete next action.
 | No notifications from Codex and log file never updates | Codex hook not wired | `tail -n 20 ~/.agentnotifier/logs/codex_notifier.log` after a completed turn | Use `notify = [...]` in `~/.codex/config.toml` and restart Codex |
 | Codex log updates with `agent-turn-complete` payloads but no popup | Hook runs, desktop backend or OS UI is blocking | `agent-notifier test-notifier --channel both --verbose` | Enable notifications for your terminal app, disable Focus/Do Not Disturb, enable banners |
 | Chime plays but no popup | Sound path works, visual notifications blocked by OS settings | Run `agent-notifier test-notifier --channel both --verbose` | In System Settings -> Notifications, allow alerts for terminal/iTerm and `terminal-notifier` (if listed) |
-| `zsh: command not found: agent-notifier` | Installed in a different Python env or not on `PATH` | `command -v agent-notifier` | Use absolute binary path (for example `~/miniconda3/bin/agent-notifier-codex-hook`) or update `PATH` |
-| Manual bridge test prints `[codex] Done` but Codex turns show nothing | Bridge itself is healthy; Codex config/session issue | Run manual test and compare with Codex log updates | Restart Codex fully; confirm the same bridge path is in `notify = [...]` |
+| `zsh: command not found: agent-notifier` | Installed in a different Python env or not on `PATH` | `command -v agent-notifier` | Use `pipx ensurepath`, update `PATH`, or pin the hook with `agent-notifier setup codex --hook-command "$(command -v agent-notifier-codex-hook)"` |
+| Manual bridge test prints `[codex] Done` but Codex turns show nothing | Bridge itself is healthy; Codex config/session issue | Run manual test and compare with Codex log updates | Restart Codex fully; confirm `notify = ["agent-notifier-codex-hook"]` or the pinned absolute hook path |
 | Manual bridge command returns no output but exit code is `0` | Event did not match (often malformed payload text) | Use key-value payload form | Run: `./examples/codex_notifier_bridge.sh --channel both --verbose type=agent-turn-complete turn-id=manual-check` |
 | Gemini `AfterAgent` hook never runs | Project path is untrusted in Gemini | Set hook command to write `/tmp/gemini_afteragent.log` and verify file updates | Add project path as `TRUST_FOLDER` in `~/.gemini/trustedFolders.json`, restart Gemini |
 | Desktop backend failure mentions `terminal-notifier` | `terminal-notifier` present but failing/crashing | `agent-notifier test-notifier --channel both --verbose` | Reinstall/fix `terminal-notifier` or rely on `osascript` fallback |
@@ -424,7 +522,8 @@ macOS:
 
 Windows:
 - Primary backend: PowerShell + BurntToast.
-- Optional fallback dependency: `pip install "agent-notifier[windows]"`.
+- Recommended install: `pipx install "agent-notifier[windows]"`.
+- If the package is already installed, add the Python fallback with `pipx inject agent-notifier win10toast`.
 
 Linux:
 - Desktop notifications via `notify-send`.
@@ -446,10 +545,6 @@ Release checklist:
 - `docs/release_checklist.md`
 
 Project/process docs:
-- `docs/project_charter.md`
-- `docs/scrum_working_agreement.md`
-- `docs/assumptions.md`
-- `docs/commit_plan.md`
 - `SECURITY.md`
 
 ## License

@@ -17,6 +17,7 @@ from typing import Any
 import click
 
 from agentnotifier.config.config import AppConfig, load_config
+from agentnotifier.core.doctor import collect_doctor_report, render_doctor_report
 from agentnotifier.core.notifications import (
     build_title,
     notifier_run_completion,
@@ -25,6 +26,15 @@ from agentnotifier.core.notifications import (
 from agentnotifier.core.procinfo import get_process_name
 from agentnotifier.core.result import RunResult, WatchResult
 from agentnotifier.core.runner import ProcessRunner
+from agentnotifier.core.setup import (
+    SetupError,
+    ensure_claude_hooks,
+    ensure_codex_notify_hook,
+    ensure_gemini_hook,
+    resolve_claude_hook_command,
+    resolve_codex_hook_command,
+    resolve_gemini_hook_command,
+)
 from agentnotifier.core.watcher import ProcessWatcher
 from agentnotifier.notifier.base import (
     NotificationLevel,
@@ -137,6 +147,26 @@ def _try_parse_json_object(payload_text: str) -> dict[str, object] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _read_stdin_text(*, source_label: str, verbose: bool) -> str | None:
+    try:
+        if sys.stdin.isatty():
+            if verbose:
+                _warn(
+                    f"{source_label} payload missing. "
+                    "No piped stdin detected; skipping notification."
+                )
+            return None
+    except Exception:
+        pass
+
+    try:
+        return sys.stdin.read()
+    except Exception as exc:
+        if verbose:
+            _warn(f"Unable to read {source_label} payload from stdin: {exc}")
+        return None
 
 
 def _read_json_lines_payload(
@@ -735,8 +765,12 @@ def gemini_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_stdin_text(source_label="Gemini hook", verbose=verbose)
+    if payload_text is None:
+        return
+
     payload = _read_json_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Gemini hook",
     )
@@ -855,8 +889,12 @@ def claude_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_stdin_text(source_label="Claude hook", verbose=verbose)
+    if payload_text is None:
+        return
+
     payload = _read_json_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Claude hook",
     )
@@ -963,7 +1001,10 @@ def codex_hook_command(
 ) -> None:
     payload_obj = _parse_codex_payload_parts(payload_parts)
     if payload_obj is None:
-        payload_obj = _try_parse_json_object(sys.stdin.read())
+        payload_text = _read_stdin_text(source_label="Codex hook", verbose=verbose)
+        if payload_text is None:
+            return
+        payload_obj = _try_parse_json_object(payload_text)
     if payload_obj is None:
         if verbose:
             _warn("Codex hook payload missing. Skipping notification.")
@@ -1059,8 +1100,12 @@ def ollama_hook_command(
     chime: str,
     verbose: bool,
 ) -> None:
+    payload_text = _read_stdin_text(source_label="Ollama hook", verbose=verbose)
+    if payload_text is None:
+        return
+
     payload = _read_json_lines_payload(
-        payload_text=sys.stdin.read(),
+        payload_text=payload_text,
         verbose=verbose,
         source_label="Ollama hook",
     )
@@ -1146,6 +1191,340 @@ def watch_command(
     if result.exit_code is not None:
         raise SystemExit(result.exit_code)
     raise SystemExit(0)
+
+
+@app.group("setup", help="Configure agent-notifier integrations.")
+def setup_group() -> None:
+    """Integration setup commands."""
+
+
+def _render_setup_path(path: Path) -> str:
+    return str(path.expanduser())
+
+
+def _emit_setup_file_result(label: str, *, path: Path, changed: bool, backup_path: Path | None) -> None:
+    if backup_path is not None:
+        click.echo(f"{label} backup: {_render_setup_path(backup_path)}")
+    status = "updated" if changed else "already configured"
+    click.echo(f"{label}: {status} ({_render_setup_path(path)})")
+
+
+def _emit_macos_notification_reminder() -> None:
+    """Print a macOS-specific notification permission reminder after setup.
+
+    On macOS, ``osascript`` always exits with code 0 — even when macOS
+    silently drops the notification because the calling app has not been
+    granted notification permission.  There is no way for agent-notifier to
+    detect or fix this automatically; it requires a one-time manual step in
+    System Settings.  We print this reminder after every setup command so
+    users have the information immediately rather than discovering the gap
+    after a long agent run produces no popup.
+    """
+    if platform.system() != "Darwin":
+        return
+    click.echo("")
+    click.echo("NOTE (macOS — action required):")
+    click.echo(
+        "  Desktop notifications need permission for your terminal app in System Settings."
+    )
+    click.echo(
+        "  macOS silently drops notifications without permission and osascript still"
+    )
+    click.echo("  exits 0, so there is no error even when nothing appears.")
+    click.echo("")
+    click.echo("  Steps:")
+    click.echo(
+        "    1. Open System Settings -> Notifications"
+    )
+    click.echo(
+        "    2. Find your terminal app (Terminal / iTerm2 / Warp / WezTerm)"
+    )
+    click.echo(
+        "    3. Set 'Allow Notifications' ON and choose 'Banners' or 'Alerts'"
+    )
+    click.echo(
+        "    4. If terminal-notifier is installed, allow it too"
+    )
+    click.echo(
+        "    5. Confirm with: agent-notifier test-notifier --channel desktop"
+    )
+    click.echo("")
+
+
+@setup_group.command("codex", help="Wire the Codex notify hook to agent-notifier.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Codex config file to update. Defaults to ~/.codex/config.toml.",
+)
+@click.option(
+    "--hook-command",
+    type=str,
+    default=None,
+    help="Exact command/path that Codex should run for notifications.",
+)
+@click.option(
+    "--backup/--no-backup",
+    default=True,
+    show_default=True,
+    help="Create a timestamped backup before changing an existing config file.",
+)
+def setup_codex_command(
+    config_path: Path | None,
+    hook_command: str | None,
+    backup: bool,
+) -> None:
+    resolved_hook_command = resolve_codex_hook_command(hook_command)
+    try:
+        result = ensure_codex_notify_hook(
+            config_path=config_path,
+            hook_command=resolved_hook_command,
+            backup=backup,
+        )
+    except SetupError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if result.backup_path is not None:
+        click.echo(f"Backed up {result.config_path} -> {result.backup_path}")
+
+    if result.changed:
+        click.echo(f"Updated {result.config_path}")
+    else:
+        click.echo(f"No changes needed in {result.config_path}")
+
+    click.echo(f"Hook command: {result.hook_command}")
+    click.echo("Restart Codex to pick up the new notify hook.")
+    _emit_macos_notification_reminder()
+
+
+@setup_group.command("gemini", help="Wire Gemini AfterAgent hooks to agent-notifier.")
+@click.option(
+    "--project",
+    "project_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Project directory to trust in Gemini. Defaults to the current directory.",
+)
+@click.option(
+    "--settings",
+    "settings_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Gemini settings file to update. Defaults to ~/.gemini/settings.json.",
+)
+@click.option(
+    "--trusted-folders",
+    "trusted_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Gemini trustedFolders file to update. Defaults to ~/.gemini/trustedFolders.json.",
+)
+@click.option(
+    "--hook-command",
+    type=str,
+    default=None,
+    help="Exact command/path that Gemini should run for notifications.",
+)
+@click.option(
+    "--backup/--no-backup",
+    default=True,
+    show_default=True,
+    help="Create timestamped backups before changing existing config files.",
+)
+def setup_gemini_command(
+    project_dir: Path | None,
+    settings_path: Path | None,
+    trusted_path: Path | None,
+    hook_command: str | None,
+    backup: bool,
+) -> None:
+    resolved_project = (project_dir or Path.cwd()).expanduser().resolve()
+    resolved_hook_command = resolve_gemini_hook_command(hook_command)
+    try:
+        result = ensure_gemini_hook(
+            project_dir=resolved_project,
+            hook_command=resolved_hook_command,
+            settings_path=settings_path,
+            trusted_path=trusted_path,
+            backup=backup,
+        )
+    except SetupError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _emit_setup_file_result(
+        "Gemini settings",
+        path=result.settings.path,
+        changed=result.settings.changed,
+        backup_path=result.settings.backup_path,
+    )
+    _emit_setup_file_result(
+        "Gemini trust",
+        path=result.trusted_folders.path,
+        changed=result.trusted_folders.changed,
+        backup_path=result.trusted_folders.backup_path,
+    )
+    click.echo(f"Hook command: {result.hook_command}")
+    click.echo(f"Trusted project: {_render_setup_path(result.project_dir)}")
+    click.echo("Restart Gemini to pick up the new hook config.")
+    _emit_macos_notification_reminder()
+
+
+@setup_group.command("claude", help="Wire Claude Code hooks to agent-notifier.")
+@click.option(
+    "--project",
+    "project_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Project directory for project-scoped Claude settings. Defaults to the current directory.",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(["project", "user"], case_sensitive=False),
+    default="project",
+    show_default=True,
+    help="Write project-local settings or user-level Claude settings.",
+)
+@click.option(
+    "--config",
+    "settings_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Exact Claude settings file to update. Overrides --scope.",
+)
+@click.option(
+    "--hook-command",
+    type=str,
+    default=None,
+    help="Exact command/path that Claude Code should run for notifications.",
+)
+@click.option(
+    "--backup/--no-backup",
+    default=True,
+    show_default=True,
+    help="Create a timestamped backup before changing an existing config file.",
+)
+def setup_claude_command(
+    project_dir: Path | None,
+    scope: str,
+    settings_path: Path | None,
+    hook_command: str | None,
+    backup: bool,
+) -> None:
+    resolved_project = (project_dir or Path.cwd()).expanduser().resolve()
+    resolved_hook_command = resolve_claude_hook_command(hook_command)
+    try:
+        result = ensure_claude_hooks(
+            project_dir=resolved_project,
+            hook_command=resolved_hook_command,
+            settings_path=settings_path,
+            use_user_settings=scope.lower() == "user",
+            backup=backup,
+        )
+    except SetupError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _emit_setup_file_result(
+        "Claude settings",
+        path=result.settings.path,
+        changed=result.settings.changed,
+        backup_path=result.settings.backup_path,
+    )
+    click.echo(f"Hook command: {result.hook_command}")
+    click.echo(f"Stop command: {result.stop_command}")
+    click.echo(f"SubagentStop command: {result.subagent_stop_command}")
+    click.echo("Restart Claude Code to pick up the new hook config.")
+    _emit_macos_notification_reminder()
+
+
+@setup_group.command("all", help="Wire Codex, Gemini, and Claude Code to agent-notifier.")
+@click.option(
+    "--project",
+    "project_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Project directory used for Gemini trust and project-scoped Claude settings.",
+)
+@click.option(
+    "--claude-scope",
+    type=click.Choice(["project", "user"], case_sensitive=False),
+    default="project",
+    show_default=True,
+    help="Write project-local or user-level Claude settings.",
+)
+@click.option(
+    "--backup/--no-backup",
+    default=True,
+    show_default=True,
+    help="Create timestamped backups before changing existing config files.",
+)
+def setup_all_command(project_dir: Path | None, claude_scope: str, backup: bool) -> None:
+    resolved_project = (project_dir or Path.cwd()).expanduser().resolve()
+    try:
+        codex_result = ensure_codex_notify_hook(
+            hook_command=resolve_codex_hook_command(),
+            backup=backup,
+        )
+        gemini_result = ensure_gemini_hook(
+            project_dir=resolved_project,
+            hook_command=resolve_gemini_hook_command(),
+            backup=backup,
+        )
+        claude_result = ensure_claude_hooks(
+            project_dir=resolved_project,
+            hook_command=resolve_claude_hook_command(),
+            use_user_settings=claude_scope.lower() == "user",
+            backup=backup,
+        )
+    except SetupError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if codex_result.backup_path is not None:
+        click.echo(f"Codex backup: {_render_setup_path(codex_result.backup_path)}")
+    codex_status = "updated" if codex_result.changed else "already configured"
+    click.echo(f"Codex: {codex_status} ({_render_setup_path(codex_result.config_path)})")
+    click.echo(f"Codex hook command: {codex_result.hook_command}")
+    _emit_setup_file_result(
+        "Gemini settings",
+        path=gemini_result.settings.path,
+        changed=gemini_result.settings.changed,
+        backup_path=gemini_result.settings.backup_path,
+    )
+    _emit_setup_file_result(
+        "Gemini trust",
+        path=gemini_result.trusted_folders.path,
+        changed=gemini_result.trusted_folders.changed,
+        backup_path=gemini_result.trusted_folders.backup_path,
+    )
+    click.echo(f"Gemini hook command: {gemini_result.hook_command}")
+    click.echo(f"Trusted project: {_render_setup_path(gemini_result.project_dir)}")
+    _emit_setup_file_result(
+        "Claude settings",
+        path=claude_result.settings.path,
+        changed=claude_result.settings.changed,
+        backup_path=claude_result.settings.backup_path,
+    )
+    click.echo(f"Claude hook command: {claude_result.hook_command}")
+    click.echo("Restart Codex, Gemini, and Claude Code to pick up the new hook config.")
+    _emit_macos_notification_reminder()
+
+
+@app.command("doctor", help="Show install and integration diagnostics for this machine.")
+@click.option(
+    "--project",
+    "project_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Project directory used for Gemini and Claude checks. Defaults to the current directory.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+def doctor_command(project_dir: Path | None, json_output: bool) -> None:
+    report = collect_doctor_report(project_dir=project_dir)
+    if json_output:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(render_doctor_report(report))
 
 
 @app.command("test-notifier", help="Send a sample notification.")

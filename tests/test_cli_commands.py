@@ -4,7 +4,7 @@ import json
 
 from click.testing import CliRunner
 
-from agentnotifier.cli import app
+from agentnotifier.cli import _read_stdin_text, app
 from agentnotifier.notifier.base import NotificationError, NotificationLevel, Notifier
 
 
@@ -330,6 +330,27 @@ def test_codex_hook_command_without_payload_skips() -> None:
     )
     assert result.exit_code == 0
     assert "payload missing" in result.output
+
+
+def test_read_stdin_text_skips_interactive_terminal(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class TtyStdin:
+        def __init__(self) -> None:
+            self.read_called = False
+
+        def isatty(self) -> bool:
+            return True
+
+        def read(self) -> str:
+            self.read_called = True
+            raise AssertionError("stdin.read() should not be called for interactive terminals")
+
+    fake_stdin = TtyStdin()
+    monkeypatch.setattr("agentnotifier.cli.sys.stdin", fake_stdin)
+
+    result = _read_stdin_text(source_label="Codex hook", verbose=True)
+
+    assert result is None
+    assert fake_stdin.read_called is False
 
 
 def test_ollama_hook_command_notifies_on_done_jsonl() -> None:

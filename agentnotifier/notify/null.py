@@ -1,35 +1,11 @@
-"""Null notifier used in tests."""
+"""Null notifier (test stub).
+
+Re-exports from the canonical ``agentnotifier.notifier.null`` implementation.
+See ``notify/macos.py`` for the full rationale.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any
+from agentnotifier.notifier.null import NullNotifier, SentNotification
 
-from agentnotifier.notifier.base import NotificationLevel, Notifier
-
-
-@dataclass(slots=True)
-class SentNotification:
-    title: str
-    message: str
-    level: NotificationLevel
-    metadata: Mapping[str, Any] | None
-
-
-class NullNotifier(Notifier):
-    """Captures notifications without sending them anywhere."""
-
-    def __init__(self) -> None:
-        self.notifications: list[SentNotification] = []
-
-    def notifier(
-        self,
-        title: str,
-        message: str,
-        level: NotificationLevel = NotificationLevel.INFO,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> None:
-        self.notifications.append(
-            SentNotification(title=title, message=message, level=level, metadata=metadata)
-        )
+__all__ = ["NullNotifier", "SentNotification"]

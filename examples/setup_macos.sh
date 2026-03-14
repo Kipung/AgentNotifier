@@ -143,134 +143,22 @@ log "gemini hook: $GEMINI_HOOK_BIN"
 
 if [[ "$CONFIGURE_CODEX" -eq 1 ]]; then
   log "Updating ~/.codex/config.toml notify hook"
-  export CODEX_HOOK_BIN
-  python3 <<'PY'
-from __future__ import annotations
-
-import datetime
-import os
-import re
-from pathlib import Path
-
-cfg = Path.home() / ".codex" / "config.toml"
-cfg.parent.mkdir(parents=True, exist_ok=True)
-text = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-
-if cfg.exists():
-    stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    backup = cfg.with_name(f"{cfg.name}.bak.{stamp}")
-    backup.write_text(text, encoding="utf-8")
-    print(f"[setup] Backed up {cfg} -> {backup}")
-
-replacement = f'notify = ["{os.environ["CODEX_HOOK_BIN"]}"]\n'
-patterns = [
-    re.compile(r"(?ms)^\s*notify\s*=\s*\[[^\]]*\]\s*"),
-    re.compile(r"(?m)^\s*notify\s*=.*$"),
-]
-
-updated = text
-for pattern in patterns:
-    if pattern.search(updated):
-        updated = pattern.sub(replacement, updated, count=1)
-        break
-else:
-    if updated.strip():
-        if not updated.endswith("\n"):
-            updated += "\n"
-        updated += "\n"
-    updated += replacement
-
-cfg.write_text(updated, encoding="utf-8")
-print(f"[setup] Updated {cfg}")
-PY
+  "$AGENT_NOTIFIER_BIN" setup codex
 fi
 
 if [[ "$CONFIGURE_GEMINI" -eq 1 ]]; then
   log "Updating Gemini hook config and trusted folder"
-  export GEMINI_HOOK_BIN TRUST_DIR
-  python3 <<'PY'
-from __future__ import annotations
-
-import datetime
-import json
-import os
-from pathlib import Path
-
-hook_command = os.environ["GEMINI_HOOK_BIN"]
-trust_dir = str(Path(os.environ["TRUST_DIR"]).expanduser().resolve())
-
-settings_path = Path.home() / ".gemini" / "settings.json"
-settings_path.parent.mkdir(parents=True, exist_ok=True)
-if settings_path.exists():
-    raw = settings_path.read_text(encoding="utf-8")
-    settings = json.loads(raw)
-    stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    backup = settings_path.with_name(f"{settings_path.name}.bak.{stamp}")
-    backup.write_text(raw, encoding="utf-8")
-    print(f"[setup] Backed up {settings_path} -> {backup}")
-else:
-    settings = {}
-
-settings.setdefault("hooksConfig", {})["enabled"] = True
-hooks = settings.setdefault("hooks", {})
-after_agent = hooks.setdefault("AfterAgent", [])
-entry = {
-    "matcher": "*",
-    "hooks": [
-        {
-            "type": "command",
-            "name": "agent-notifier-gemini-task",
-            "description": "Send notification when Gemini finishes an agent cycle.",
-            "command": hook_command,
-            "timeout": 10000,
-        }
-    ],
-}
-
-replaced = False
-for idx, candidate in enumerate(after_agent):
-    if not isinstance(candidate, dict):
-        continue
-    nested = candidate.get("hooks")
-    if not isinstance(nested, list):
-        continue
-    for hook in nested:
-        if not isinstance(hook, dict):
-            continue
-        if hook.get("command") == hook_command or hook.get("name") == "agent-notifier-gemini-task":
-            after_agent[idx] = entry
-            replaced = True
-            break
-    if replaced:
-        break
-
-if not replaced:
-    after_agent.append(entry)
-
-settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-print(f"[setup] Updated {settings_path}")
-
-trusted_path = Path.home() / ".gemini" / "trustedFolders.json"
-if trusted_path.exists():
-    raw_trusted = trusted_path.read_text(encoding="utf-8")
-    trusted = json.loads(raw_trusted)
-    stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    backup = trusted_path.with_name(f"{trusted_path.name}.bak.{stamp}")
-    backup.write_text(raw_trusted, encoding="utf-8")
-    print(f"[setup] Backed up {trusted_path} -> {backup}")
-else:
-    trusted = {}
-
-trusted[trust_dir] = "TRUST_FOLDER"
-trusted_path.write_text(json.dumps(trusted, indent=2) + "\n", encoding="utf-8")
-print(f"[setup] Trusted Gemini folder: {trust_dir}")
-print(f"[setup] Updated {trusted_path}")
-PY
+  "$AGENT_NOTIFIER_BIN" setup gemini --project "$TRUST_DIR"
 fi
 
 log "Running notifier self-test"
 if ! "$AGENT_NOTIFIER_BIN" test-notifier --channel both --verbose; then
   warn "Self-test failed. Run with --channel console to validate basic install."
+fi
+
+log "Running environment doctor"
+if ! "$AGENT_NOTIFIER_BIN" doctor --project "$TRUST_DIR"; then
+  warn "Environment doctor reported issues. Review the output before shipping this setup."
 fi
 
 log "Running Codex bridge smoke test"

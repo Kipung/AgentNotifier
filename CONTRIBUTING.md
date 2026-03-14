@@ -13,6 +13,8 @@ python -m pip install -e ".[dev]"
 ```bash
 ruff check .
 pytest -q
+python -m build
+twine check dist/*
 ```
 
 ## Pull requests
@@ -20,8 +22,9 @@ pytest -q
 - Keep changes focused and small.
 - Add or update tests for behavior changes.
 - Update `CHANGELOG.md` for user-visible changes.
+- Run `agent-notifier doctor --project "$PWD"` when you touch install or hook setup behavior.
 - Ensure CI passes on macOS and Windows.
 
 ## Commit style
 
-Use clear, imperative commit messages. See `docs/commit_plan.md` for a suggested sequence.
+Use clear, imperative commit messages.
