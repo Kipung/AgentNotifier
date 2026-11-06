@@ -1,5 +1,23 @@
 # agent-notifier
 
+Stop watching your terminal. Get pinged the moment a long task or AI coding agent finishes.
+It reports success or failure, duration, exit code and the last lines of output.
+It wraps any command, and hooks into Codex, Claude Code, Gemini and Ollama pipelines.
+
+![agent-notifier demo: a successful run then a failed run, each ending with a notification](docs/demo.gif)
+
+## Quickstart
+
+```bash
+pipx install agent-notifier                    # or: pip install agent-notifier
+agent-notifier doctor                          # check your setup
+agent-notifier run -- sleep 5                  # wrap any command, get notified when it ends
+agent-notifier run --channel console -- make   # no desktop popup, print to the terminal
+agent-notifier setup codex                     # hook into Codex (also: claude, gemini)
+```
+
+## Overview
+
 `agent-notifier` sends notifications when long-running CLI/agent tasks finish.
 
 It supports two usage styles:
