@@ -143,7 +143,9 @@ def ensure_gemini_hook(
 ) -> GeminiSetupResult:
     """Create or update Gemini hook config and trust for a project."""
     resolved_project = project_dir.expanduser().resolve()
-    target_settings_path = (settings_path or (Path.home() / ".gemini" / "settings.json")).expanduser()
+    target_settings_path = (
+        settings_path or (Path.home() / ".gemini" / "settings.json")
+    ).expanduser()
     target_trusted_path = (
         trusted_path or (Path.home() / ".gemini" / "trustedFolders.json")
     ).expanduser()
@@ -287,7 +289,8 @@ def _upsert_notify_hook(text: str, hook_command: str) -> tuple[str, bool]:
         insert_pos = section_match.start()
         prefix = text[:insert_pos].rstrip("\n")
         suffix = text[insert_pos:]
-        updated = f"{prefix}\n\n{replacement}\n\n{suffix}" if prefix else f"{replacement}\n\n{suffix}"
+        body = f"{replacement}\n\n{suffix}"
+        updated = f"{prefix}\n\n{body}" if prefix else body
         return updated, True
 
     updated = text
@@ -309,7 +312,9 @@ def _replace_notify_match(text: str, match: re.Match[str], hook_command: str) ->
             "Edit the file manually."
         )
 
-    updated_values = _merge_codex_hook_values(current_values=current_values, hook_command=hook_command)
+    updated_values = _merge_codex_hook_values(
+        current_values=current_values, hook_command=hook_command
+    )
     if updated_values == current_values:
         return text, False
 

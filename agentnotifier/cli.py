@@ -1202,7 +1202,9 @@ def _render_setup_path(path: Path) -> str:
     return str(path.expanduser())
 
 
-def _emit_setup_file_result(label: str, *, path: Path, changed: bool, backup_path: Path | None) -> None:
+def _emit_setup_file_result(
+    label: str, *, path: Path, changed: bool, backup_path: Path | None
+) -> None:
     if backup_path is not None:
         click.echo(f"{label} backup: {_render_setup_path(backup_path)}")
     status = "updated" if changed else "already configured"
